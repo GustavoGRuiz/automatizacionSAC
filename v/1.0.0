@@ -1,0 +1,167 @@
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
+import datetime as date
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Alignment, Font
+from openpyxl.utils import get_column_letter
+import pandas as pd
+import numpy as np
+import time
+
+class LoginSAC:
+    def __init__(self):
+        self.driver = None
+        self.wait = None
+
+    def browser_url(self, url):
+        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+        self.wait = WebDriverWait(self.driver, 10)
+        self.driver.get(url)
+
+    def loginSAC(self, usuario, password):
+        if not self.driver:
+            raise Exception("El navegador no está iniciado. Llama a browser_url() primero.")
+        try:
+            txtUserName = self.wait.until(EC.presence_of_element_located((By.ID, 'txtUserName')))
+            txtUserName.send_keys(usuario)
+            txtContrasenia = self.wait.until(EC.presence_of_element_located((By.ID, 'txtUserContrasenia')))
+            txtContrasenia.send_keys(password)
+            btn_ingresar = self.wait.until(EC.presence_of_element_located((By.ID, 'cmdLogin')))
+            btn_ingresar.click()
+            print("Datos cargados")
+        except Exception as e:
+            print(f"Error al iniciar sesión: {e}")
+
+    def close_browser(self):
+        if self.driver:
+            self.driver.quit()
+
+
+class Scrap:
+    def __init__(self, driver):
+        self.driver = driver
+        self.wait = WebDriverWait(driver, 10)
+
+    def scrapping(self):
+        try:
+            self.driver.switch_to.window(self.driver.window_handles[-1])
+            time.sleep(2)
+            novedades = self.wait.until(EC.presence_of_element_located((By.ID, 'tbBody_grdExpedientes')))
+            filas = novedades.find_elements(By.TAG_NAME, 'tr')
+            if not filas:
+                print("No se encontraron filas en la tabla.")
+                return
+        except Exception as e:
+            print(f"No se pudo encontrar la tabla novedades: {e}")
+            return
+
+        expte = []
+        caratula = []
+        ubicacion = []
+        decreto = []
+
+        for fila in filas:
+            columna = fila.find_elements(By.TAG_NAME, 'td')
+            if len(columna) >= 7:
+                expte.append(columna[1].text.strip())
+                caratula.append(columna[2].text.strip())
+                ubicacion.append(columna[5].text.strip())
+                try:
+                    self.extraer_decreto(columna, decreto)
+                except Exception as e:
+                    print(f"No se puede obtener decreto: {e}")
+                    decreto.append("No disponible")
+        self.exportar_excel(expte, caratula, ubicacion, decreto)
+
+    def extraer_decreto(self, columna, decreto):
+        try:
+            icono_decreto = columna[6].find_element(By.TAG_NAME, 'img')
+            self.driver.execute_script("arguments[0].click();", icono_decreto)
+
+            iframe=self.wait.until(EC.presence_of_element_located((By.TAG_NAME, 'iframe')))
+            self.driver.switch_to.frame(iframe)
+            time.sleep(1)
+
+            fila = self.wait.until(EC.presence_of_element_located((By.ID, 'grdOperaciones_Row_0')))
+            time.sleep(1)
+
+            icono2= self.wait.until(EC.element_to_be_clickable((By.ID, 'grdOperaciones_Row_0_column4')))
+            self.driver.execute_script("arguments[0].click();", icono2)
+            time.sleep(1)
+            try:
+                iframe2=self.wait.until(EC.presence_of_element_located((By.XPATH, '//*[@webdialogid="iframe_0"]')))
+                self.driver.switch_to.frame(iframe2)
+                texto_decreto = self.wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="lblTextoOperacion"]/div'))).text.strip()
+                decreto.append(texto_decreto)
+                self.driver.switch_to.default_content()
+                self.driver.execute_script('document.querySelector("span.dialogCloseButton[onclick*=\'close\']").click();')
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"No se puede copiar el decreto")
+        except Exception as e:
+            print(f"Error al extraer decreto o cerrar modal: {e}")
+            decreto.append("No disponible")
+        finally:
+            self.driver.switch_to.default_content()
+
+    def exportar_excel(self, expte, caratula, ubicacion, decreto):
+        df = pd.DataFrame({
+            'Nro. Expediente': expte,
+            'Carátula': caratula,
+            'Ubicación': ubicacion,
+            'Último decreto': decreto
+        })
+        print(df)
+
+        ubicaciones_validas = ["CASILLERO", "DESPACHO", "DILIGENCIANDOSE", "A FALLO", "A ESTUDIO", "ARCHIVO"]
+        hojas = {}
+        
+        wb = Workbook()
+
+        if 'Sheet' in wb.sheetnames:
+            del wb['Sheet']
+
+        for ubicacion in ubicaciones_validas:
+            hojas[ubicacion] = wb.create_sheet(title=ubicacion)
+
+        for _, row in df.iterrows():
+            ubicacion_actual = row['Ubicación']
+            if ubicacion_actual in hojas:
+                hoja =hojas[ubicacion_actual]
+                if hoja.max_row==1:
+                    hoja.append(df.columns.tolist())
+                hoja.append(row.tolist())
+        
+        for hoja in hojas.values():
+            for col in hoja.iter_cols(min_row=1, max_row=hoja.max_row, min_col=1, max_col=hoja.max_column):
+                col_letter = get_column_letter(col[0].column)
+                if col[0].column == 2:
+                    hoja.column_dimensions[col_letter].width = 50
+                    alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                elif col[0].column == 4:
+                    hoja.column_dimensions[col_letter].width = 100
+                    alignment = Alignment(horizontal='center', vertical='top', wrap_text=True)
+                else:
+                    hoja.column_dimensions[col_letter].width = 20
+                    alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+                for cell in col:
+                    cell.alignment = alignment
+                    cell.font = Font(bold=True) if cell.row == 1 else Font(bold=False)
+
+        wb.save("Novedades.xlsx")
+
+if __name__ == "__main__":
+    login = LoginSAC()
+    login.browser_url(url="https://www.justiciacordoba.gob.ar/MarcoPolo/_Expedientes/ExpedientesNovedades.aspx")
+    login.loginSAC("usuario", "password")
+    scrapeo = Scrap(login.driver)
+    scrapeo.scrapping()
+    login.close_browser()
+    print("Completado con éxito")
